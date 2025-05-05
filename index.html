@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>🎤 Real-Time Voice Command Transcript with VAD + Inference Latency</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite/dist/tf-tflite.min.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background-color: #f9f9f9;
+      margin: 0;
+      padding: 2rem;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h2 {
+      font-size: 1.8rem;
+      color: #222;
+      margin-bottom: 1rem;
+    }
+
+    button {
+      padding: 0.6rem 1.2rem;
+      font-size: 1rem;
+      margin: 0 0.5rem;
+      border: none;
+      border-radius: 8px;
+      background: #0066ff;
+      color: white;
+      cursor: pointer;
+      transition: background 0.3s ease;
+    }
+
+    button:disabled {
+      background: #999;
+      cursor: not-allowed;
+    }
+
+    button:hover:enabled {
+      background: #004dcc;
+    }
+
+    #transcript {
+      margin-top: 2rem;
+      width: 90%;
+      max-width: 600px;
+      padding: 1rem;
+      background: #ffffff;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+      font-size: 1.2rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .controls {
+      margin-top: 1rem;
+    }
+
+    .latency {
+      margin-top: 1rem;
+      font-size: 0.9rem;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <h2>🎤 Real-Time Voice Command Transcript</h2>
+  <div class="controls">
+    <button id="startBtn" onclick="startListening()" disabled>Start Listening</button>
+    <button id="stopBtn" onclick="stopListening()" disabled>Stop</button>
+  </div>
+  <div id="transcript">Transcript:<br></div>
+  <div class="latency" id="latencyDisplay">Inference Latency: -- ms</div>
+
+  <script>
+    let tfliteModel;
+    let listening = false;
+    let stream, audioContext, micSource, recorder;
+    const TARGET_SAMPLE_RATE = 16000;
+    const WINDOW_DURATION = 0.5; // seconds
+    const VAD_THRESHOLD = 0.02;
+    const COMMANDS = ['wow', 'yes', 'noise'];
+    let sampleRate = 44100;
+
+    async function loadModel() {
+      tfliteModel = await tflite.loadTFLiteModel('voice_model_raw.tflite');
+      console.log("✅ Model loaded");
+      document.getElementById("startBtn").disabled = false;
+    }
+
+    function resampleTo16k(float32Audio, originalSampleRate) {
+      const ratio = originalSampleRate / TARGET_SAMPLE_RATE;
+      const newLength = Math.floor(float32Audio.length / ratio);
+      const resampled = new Float32Array(newLength);
+      for (let i = 0; i < newLength; i++) {
+        resampled[i] = float32Audio[Math.floor(i * ratio)];
+      }
+      return resampled;
+    }
+
+    function isSpeechPresent(buffer, threshold = VAD_THRESHOLD) {
+      const energy = buffer.reduce((sum, val) => sum + Math.abs(val), 0) / buffer.length;
+      return energy > threshold;
+    }
+
+    async function startListening() {
+      document.getElementById("stopBtn").disabled = false;
+      document.getElementById("startBtn").disabled = true;
+      listening = true;
+
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioContext = new AudioContext();
+      sampleRate = audioContext.sampleRate;
+
+      micSource = audioContext.createMediaStreamSource(stream);
+      recorder = audioContext.createScriptProcessor(4096, 1, 1);
+      const buffer = [];
+      const chunkSize = Math.floor(sampleRate * WINDOW_DURATION);
+
+      recorder.onaudioprocess = function (e) {
+        if (!listening) return;
+
+        const data = e.inputBuffer.getChannelData(0);
+        buffer.push(...data);
+
+        if (buffer.length >= chunkSize) {
+          const chunk = buffer.splice(0, chunkSize);
+
+          // Check for speech before processing
+          if (!isSpeechPresent(chunk)) {
+            console.log("🔇 Silence detected (VAD skipped prediction)");
+            return;
+          }
+
+          const resampled = resampleTo16k(chunk, sampleRate);
+          const padded = new Float32Array(16000);
+          padded.set(resampled);
+
+          const inputTensor = tf.tensor(padded, [1, 16000]);
+
+          // Measure inference latency only
+          const startTime = performance.now();
+          const outputTensor = tfliteModel.predict(inputTensor);
+          const endTime = performance.now();
+
+          const inferenceLatency = (endTime - startTime).toFixed(2);
+          document.getElementById("latencyDisplay").innerText = `Inference Latency: ${inferenceLatency} ms`;
+
+          const prediction = outputTensor.arraySync()[0];
+          const maxIndex = prediction.indexOf(Math.max(...prediction));
+          const confidence = prediction[maxIndex];
+
+          if (confidence > 0.8 && COMMANDS[maxIndex] !== 'noise') {
+            document.getElementById("transcript").innerText += `${COMMANDS[maxIndex]} `;
+          }
+        }
+      };
+
+      micSource.connect(recorder);
+      recorder.connect(audioContext.destination);
+    }
+
+    function stopListening() {
+      listening = false;
+      if (recorder) recorder.disconnect();
+      if (micSource) micSource.disconnect();
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      document.getElementById("startBtn").disabled = false;
+      document.getElementById("stopBtn").disabled = true;
+    }
+
+    loadModel();
+  </script>
+</body>
+</html>
