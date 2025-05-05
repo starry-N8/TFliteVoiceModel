@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>🎤 Real-Time Voice Command Transcript with MFCC</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/dist/tf-tflite.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/meyda/dist/web/meyda.min.js"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background-color: #f9f9f9;
+      margin: 0;
+      padding: 2rem;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h2 {
+      font-size: 1.8rem;
+      color: #222;
+      margin-bottom: 1rem;
+    }
+
+    button {
+      padding: 0.6rem 1.2rem;
+      font-size: 1rem;
+      margin: 0 0.5rem;
+      border: none;
+      border-radius: 8px;
+      background: #0066ff;
+      color: white;
+      cursor: pointer;
+      transition: background 0.3s ease;
+    }
+
+    button:disabled {
+      background: #999;
+      cursor: not-allowed;
+    }
+
+    button:hover:enabled {
+      background: #004dcc;
+    }
+
+    #transcript {
+      margin-top: 2rem;
+      width: 90%;
+      max-width: 600px;
+      padding: 1rem;
+      background: #ffffff;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+      font-size: 1.2rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .controls {
+      margin-top: 1rem;
+    }
+
+    .latency {
+      margin-top: 1rem;
+      font-size: 0.9rem;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <h2>🎤 Real-Time Voice Command Transcript</h2>
+  <div class="controls">
+    <button id="startBtn" onclick="startListening()" disabled>Start Listening</button>
+    <button id="stopBtn" onclick="stopListening()" disabled>Stop</button>
+  </div>
+  <div id="transcript">Transcript:<br></div>
+  <div class="latency" id="latencyDisplay">Inference Latency: -- ms</div>
+
+  <script>
+    const COMMANDS = ["wow", "yes", "noise"];
+    const FRAMES = 49; // match training shape
+    const MFCCS = 32;
+    const VAD_THRESHOLD = 0.02;
+    const COOLDOWN_MS = 500;
+
+    let tfliteModel;
+    let audioContext, micSource, analyzer;
+    let mfccFrames = [];
+    let listening = false;
+    let lastPrediction = "";
+    let lastPredictionTime = 0;
+
+    async function loadModel() {
+      tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/wasm/');
+      tfliteModel = await tflite.loadTFLiteModel('voice_model_mfcc.tflite');
+      console.log("✅ Model loaded");
+      document.getElementById("startBtn").disabled = false;
+    }
+
+    function isSpeechPresent(frame, threshold = VAD_THRESHOLD) {
+      const energy = frame.reduce((acc, val) => acc + Math.abs(val), 0) / frame.length;
+      return energy > threshold;
+    }
+
+    function setupMeyda(source) {
+      return Meyda.createMeydaAnalyzer({
+        audioContext,
+        source,
+        bufferSize: 512,
+        hopSize: 256,
+        sampleRate: audioContext.sampleRate,
+        featureExtractors: ["mfcc"],
+        numberOfMFCCCoefficients: MFCCS,
+        callback: features => {
+          if (!features || !features.mfcc || !listening) return;
+
+          if (!isSpeechPresent(features.mfcc)) {
+            console.log("🔇 Skipped (VAD silence)");
+            return;
+          }
+
+          mfccFrames.push(features.mfcc);
+
+          if (mfccFrames.length >= FRAMES) {
+            const input = tf.tensor(mfccFrames.slice(0, FRAMES)).reshape([1, FRAMES, MFCCS, 1]);
+
+            const start = performance.now();
+            const output = tfliteModel.predict(input);
+            const end = performance.now();
+
+            const latency = (end - start).toFixed(2);
+            document.getElementById("latencyDisplay").innerText = `Inference Latency: ${latency} ms`;
+
+            const prediction = output.arraySync()[0];
+            const maxIndex = prediction.indexOf(Math.max(...prediction));
+            const confidence = prediction[maxIndex];
+            const now = Date.now();
+
+            if (
+              confidence > 0.8 &&
+              COMMANDS[maxIndex] !== 'noise' &&
+              now - lastPredictionTime > COOLDOWN_MS
+            ) {
+              document.getElementById("transcript").innerText += `${COMMANDS[maxIndex]} `;
+              lastPredictionTime = now;
+              lastPrediction = COMMANDS[maxIndex];
+              mfccFrames = []; // also clear input frames right after detection
+              return; // break early to prevent overlap
+            }
+
+
+            mfccFrames = [];
+          }
+        }
+      });
+    }
+
+    async function startListening() {
+      document.getElementById("startBtn").disabled = true;
+      document.getElementById("stopBtn").disabled = false;
+      listening = true;
+
+      audioContext = new AudioContext();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micSource = audioContext.createMediaStreamSource(stream);
+      analyzer = setupMeyda(micSource);
+      analyzer.start();
+
+      console.log("🎙️ Listening...");
+    }
+
+    function stopListening() {
+      listening = false;
+      if (analyzer) analyzer.stop();
+      if (micSource) micSource.disconnect();
+      if (audioContext) audioContext.close();
+      document.getElementById("startBtn").disabled = false;
+      document.getElementById("stopBtn").disabled = true;
+    }
+
+    loadModel();
+  </script>
+</body>
+</html>
